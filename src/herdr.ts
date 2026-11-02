@@ -102,42 +102,46 @@ export class Herdr {
 
   /**
    * Types a message into an agent's input box as one line, `[from <sender>] ` first so it can never start
-   * with a slash command or shell escape. Only an input box seen empty is typed into, so a human's
-   * half-written prompt is never merged and submitted; returns false (keep it queued) otherwise.
+   * with a slash command or shell escape (the whole line, sender included, is flattened). Only an input box
+   * seen empty is typed into, so a human's half-written prompt is never merged and submitted; returns false
+   * (keep it queued) otherwise. Known limit: a keystroke landing between that read and send-text still merges.
+   * Once the text is in, a failed Enter counts as delivered: retrying would type it a second time.
    */
   async typeLine(paneId: string, text: string, from: string): Promise<boolean> {
     if (!(await this.inputEmpty(paneId))) return false;
-    await this.type(paneId, `[from ${from}] ${oneLine(text)}`);
-    return true;
-  }
-
-  /**
-   * Best effort: true only when the bottom of the pane shows an input box (a line between two
-   * horizontal rules) holding nothing but its prompt glyph. Any other screen, or a failed read, is false.
-   */
-  async inputEmpty(paneId: string): Promise<boolean> {
-    let screen: string;
-    try {
-      screen = await this.read(paneId, 40);
-    } catch (e) {
-      if (e instanceof HerdrError) return false;
-      throw e;
-    }
-    return inputBoxEmpty(screen);
-  }
-
-  /**
-   * Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it.
-   * Once the text is in, a failed Enter still counts as delivered: retrying would type it a second time.
-   */
-  async type(paneId: string, text: string): Promise<void> {
-    await this.call(["pane", "send-text", paneId, text]);
+    await this.call(["pane", "send-text", paneId, oneLine(`[from ${from}] ${text}`)]);
     try {
       await this.call(["pane", "send-keys", paneId, "enter"]);
     } catch (e) {
       if (!(e instanceof HerdrError)) throw e;
       process.stderr.write(`dori: text typed into ${paneId} but Enter failed (${e.message}); not retrying\n`);
     }
+    return true;
+  }
+
+  /**
+   * Best effort: true only when the bottom of the pane shows an input box holding nothing but its prompt
+   * glyph. A draft is false quietly; no recognisable box or a failed read is false with a stderr note,
+   * so a screen the parser does not know shows up instead of queueing in silence.
+   */
+  async inputEmpty(paneId: string): Promise<boolean> {
+    let screen: string;
+    try {
+      screen = await this.read(paneId, 40);
+    } catch (e) {
+      if (!(e instanceof HerdrError)) throw e;
+      process.stderr.write(`dori: could not read ${paneId} to check its input box (${e.message}); queued\n`);
+      return false;
+    }
+    const box = inputBox(screen);
+    if (box === "none") process.stderr.write(`dori: input box of ${paneId} not recognised; queued\n`);
+    return box === "empty";
+  }
+
+  /** Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it. */
+  async type(paneId: string, text: string): Promise<void> {
+    await this.call(["pane", "send-text", paneId, text]);
+    await this.call(["pane", "send-keys", paneId, "enter"]);
   }
 
   async read(paneId: string, lines = 80): Promise<string> {
@@ -164,16 +168,16 @@ const BOTTOM_RULE = /^\s*─{10,}\s*$/;
 const TOP_RULE = /^\s*─{2,}.*─{3,}\s*$/;
 
 /**
- * True when the input box (the last pure horizontal rule and the rule above it) holds only prompt
- * glyphs and spaces. No box, or anything typed in it, is false.
+ * Reads the input box: the last pure horizontal rule and the rule above it. `empty` when the lines between
+ * hold only prompt glyphs and spaces, `draft` when anything is typed there, `none` when there is no such box.
  */
-export function inputBoxEmpty(screen: string): boolean {
+export function inputBox(screen: string): "empty" | "draft" | "none" {
   const lines = screen.split("\n");
   const bottom = lines.findLastIndex((l) => BOTTOM_RULE.test(l));
-  if (bottom < 1) return false;
+  if (bottom < 1) return "none";
   const top = lines.slice(0, bottom).findLastIndex((l) => TOP_RULE.test(l));
-  if (top < 0 || bottom - top < 2) return false;
-  return lines.slice(top + 1, bottom).every((l) => /^[\s❯>│|]*$/.test(l));
+  if (top < 0 || bottom - top < 2) return "none";
+  return lines.slice(top + 1, bottom).every((l) => /^[\s❯>│|]*$/.test(l)) ? "empty" : "draft";
 }
 
 /**

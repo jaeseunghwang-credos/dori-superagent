@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { done, dutyTick, flushInbox, mergeGate, ready, Refusal, report, review, send, startLane } from "../src/harness.ts";
-import { inputBoxEmpty } from "../src/herdr.ts";
+import { inputBox } from "../src/herdr.ts";
 import { World } from "./fake.ts";
 
 function setup() {
@@ -96,14 +96,27 @@ describe("pane messaging", () => {
     expect(lead.received).toEqual(["[from dori] 2 messages arrived while you were busy: / (1) from x: / note / (2) from x: / note 2"]);
   });
 
-  test("the input box is read from omo's real screen, including the Working label on its top rule", () => {
-    const rule = "─".repeat(60);
-    const working = `── • Working (4s • esc to interrupt) ${"─".repeat(30)}`;
-    const status = "~/workspace • CH99.5%";
-    expect(inputBoxEmpty(["out", rule, "❯", rule, status].join("\n"))).toBe(true);
-    expect(inputBoxEmpty(["out", working, "❯", rule, status].join("\n"))).toBe(true);
-    expect(inputBoxEmpty(["out", working, "❯ half a", "  thought", rule, status].join("\n"))).toBe(false);
-    expect(inputBoxEmpty(["out", "❯", status].join("\n"))).toBe(false);
+  test("the input box is read from raw herdr captures of a real omo pane, busy and between steps", () => {
+    for (const name of ["omo-input-busy.txt", "omo-input-between-steps.txt"]) {
+      const screen = readFileSync(join(import.meta.dir, "fixtures", name), "utf8");
+      expect(inputBox("earlier output\n" + screen)).toBe("empty");
+      expect(inputBox(screen.replace("❯", "❯ half a thought"))).toBe("draft");
+    }
+    expect(inputBox("out\n❯\n~/workspace • status")).toBe("none");
+  });
+
+  test("a newline in the sender cannot split the typed line", async () => {
+    const { d, lead } = setup();
+    lead.status = "working";
+    await send(d, "lead", "hi", "x\n/quit");
+    expect(lead.received).toEqual(["[from x / /quit] hi"]);
+  });
+
+  test("a shell pane whose Enter fails still raises, as before", async () => {
+    const { w, d } = setup();
+    const sh = w.addPane("w1:p8", "shell");
+    sh.enterFails = true;
+    await expect(send(d, "w1:p8", "ls", "lead")).rejects.toThrow("key_failed");
   });
 
   test("a lead whose state herdr cannot classify is not typed into", async () => {
