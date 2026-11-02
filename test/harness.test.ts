@@ -41,11 +41,11 @@ describe("lanes", () => {
 });
 
 describe("pane messaging", () => {
-  test("a busy lead is never interrupted: messages queue and arrive as one batch when it goes idle", async () => {
+  test("a blocked lead is never typed into: messages queue and arrive as one batch when it goes idle", async () => {
     const { d, lead, brief } = setup();
     await startLane(d, "a-lane", brief, { workspace: "w1" });
     lead.received.length = 0;
-    lead.status = "working";
+    lead.status = "blocked";
     await report(d, "a-lane", "tests red, investigating");
     expect(await send(d, "lead", "second note", "a-lane")).toBe("QUEUED");
     expect(lead.received).toEqual([]);
@@ -56,6 +56,29 @@ describe("pane messaging", () => {
     expect(lead.received[0]).toContain("2 messages arrived while you were busy");
     expect(lead.received[0]).toContain("[REPORT a-lane] tests red, investigating");
     expect(lead.received[0]).toContain("second note");
+  });
+
+  test("a lead herdr reports busy still gets the message now, typed as one line", async () => {
+    const { w, d, lead } = setup();
+    lead.status = "working";
+    expect(await send(d, "lead", "[READY x] done\nevidence: pr", "x")).toBe("DELIVERED");
+    expect(lead.received).toEqual(["[READY x] done / evidence: pr"]);
+    expect(w.calls.at(-1)!.argv).toEqual(["pane", "send-keys", "w1:p1", "enter"]);
+    expect(d.store.queued("w1:p1")).toEqual([]);
+  });
+
+  test("agent_not_ready falls back to typing one line instead of queueing", async () => {
+    const { d, lead } = setup();
+    lead.notReady = true;
+    expect(await send(d, "lead", "a\n\nb", "x")).toBe("DELIVERED");
+    expect(lead.received).toEqual(["a / b"]);
+  });
+
+  test("a busy lane is not typed into; it still queues", async () => {
+    const { w, d } = setup();
+    const lane = w.addPane("w1:p9", "working");
+    expect(await send(d, "w1:p9", "hi", "lead")).toBe("QUEUED");
+    expect(lane.received).toEqual([]);
   });
 
   test("unknown targets are refused instead of guessed", async () => {

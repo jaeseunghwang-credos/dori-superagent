@@ -6,7 +6,7 @@ import { Herdr, type AgentStatus, type Exec } from "../src/herdr.ts";
 import { Store, type HostLoad } from "../src/store.ts";
 import type { DutyCounts, TelemetryEvent, Usage } from "../src/telemetry.ts";
 
-type Pane = { status: AgentStatus; received: string[]; ran: string[] };
+type Pane = { status: AgentStatus; received: string[]; ran: string[]; notReady?: boolean };
 
 export class World {
   panes = new Map<string, Pane>();
@@ -56,6 +56,7 @@ export class World {
     if (group === "pane" && verb === "run") { pane.ran.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "send-text") { pane.received.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "send-keys") return ok({});
+    if (group === "agent" && verb === "prompt" && pane.notReady) return { code: 1, stdout: "", stderr: "agent_not_ready" };
     if (group === "agent" && verb === "prompt") { pane.received.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "close") { this.panes.delete(id!); return ok({}); }
     return { code: 1, stdout: "", stderr: `unhandled ${argv.join(" ")}` };

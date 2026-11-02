@@ -82,14 +82,23 @@ export class Herdr {
   /**
    * Delivers one message into a pane as a single argv element: nothing in it is ever
    * expanded by a shell. Agents get `agent prompt`; a plain shell pane gets text + Enter.
+   * An agent herdr will not prompt (agent_not_ready, e.g. omo with a foreground SDK child)
+   * gets the message typed as one line instead.
    */
   async deliver(paneId: string, text: string, kind: AgentStatus): Promise<void> {
-    if (kind === "shell") {
-      await this.call(["pane", "send-text", paneId, text]);
-      await this.call(["pane", "send-keys", paneId, "enter"]);
-      return;
+    if (kind === "shell") return this.type(paneId, text);
+    try {
+      await this.call(["agent", "prompt", paneId, text]);
+    } catch (e) {
+      if (!(e instanceof HerdrError && /agent_not_ready/.test(e.message))) throw e;
+      await this.type(paneId, oneLine(text));
     }
-    await this.call(["agent", "prompt", paneId, text]);
+  }
+
+  /** Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it. */
+  async type(paneId: string, text: string): Promise<void> {
+    await this.call(["pane", "send-text", paneId, text]);
+    await this.call(["pane", "send-keys", paneId, "enter"]);
   }
 
   async read(paneId: string, lines = 80): Promise<string> {
@@ -110,5 +119,9 @@ function toPaneRef(v: unknown): PaneRef {
   if (!paneId) throw new Error("herdr did not return a pane id");
   return { paneId, tabId: String(o["tab_id"] ?? ""), workspaceId: String(o["workspace_id"] ?? "") };
 }
+
+/** Flattens a message to one line so a typed Enter submits all of it at once. */
+export const oneLine = (s: string): string =>
+  s.split(/\s*\n\s*/).filter(Boolean).join(" / ");
 
 export const shq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;

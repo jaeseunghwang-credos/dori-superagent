@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
 import { join, resolve } from "node:path";
-import { Herdr, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
+import { Herdr, oneLine, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
 import { KEY_RE, Store, type HostLoad, type Lane, type Role } from "./store.ts";
 import { Telemetry, type MergeOutcome, type Usage } from "./telemetry.ts";
 
@@ -82,7 +82,11 @@ export function resolveTarget(d: Deps, target: string): string {
 
 const READY_TO_READ: readonly AgentStatus[] = ["idle", "done", "shell"];
 
-/** Delivers now when the pane can read; otherwise queues it for the duty loop (busy agents are never interrupted). */
+/**
+ * Delivers now when the pane can read; otherwise queues it for the duty loop (busy lanes are never interrupted).
+ * The lead is the exception: herdr can report it busy indefinitely, so it gets the message typed as one line
+ * (omo queues typed input as a follow-up). Only a blocked lead or a failed herdr call leaves it queued.
+ */
 export async function send(d: Deps, target: string, text: string, from: string): Promise<"DELIVERED" | "QUEUED"> {
   const paneId = resolveTarget(d, target);
   d.store.enqueue(paneId, { at: d.now(), from, text });
@@ -94,13 +98,15 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   if (queued.length === 0) return true;
   const status = await d.herdr.status(paneId);
   if (status === "gone") throw new Refusal(`pane ${paneId} is gone; ${queued.length} message(s) kept in its inbox`);
-  if (!READY_TO_READ.includes(status)) return false;
+  const typeToLead = !READY_TO_READ.includes(status) && status !== "blocked" && paneId === d.store.roles().lead;
+  if (!READY_TO_READ.includes(status) && !typeToLead) return false;
   const body =
     queued.length === 1
       ? queued[0]!.text
       : `${queued.length} messages arrived while you were busy:\n\n` +
         queued.map((m, i) => `(${i + 1}) from ${m.from}:\n${m.text}`).join("\n\n");
-  await d.herdr.deliver(paneId, body, status);
+  if (typeToLead) await d.herdr.type(paneId, oneLine(body));
+  else await d.herdr.deliver(paneId, body, status);
   d.store.clearInbox(paneId);
   return true;
 }
