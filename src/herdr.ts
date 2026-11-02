@@ -86,7 +86,7 @@ export class Herdr {
    * gets the message typed as one line instead (see typeLine). Returns false when nothing was
    * delivered and the message must stay queued.
    */
-  async deliver(paneId: string, text: string, kind: AgentStatus, from: string): Promise<boolean> {
+  async deliver(paneId: string, text: string, kind: AgentStatus, entries: readonly Typed[]): Promise<boolean> {
     if (kind === "shell") {
       await this.type(paneId, text);
       return true;
@@ -96,7 +96,7 @@ export class Herdr {
       return true;
     } catch (e) {
       if (!(e instanceof HerdrError && /agent_not_ready/.test(e.message))) throw e;
-      return this.typeLine(paneId, text, from);
+      return this.typeLine(paneId, entries);
     }
   }
 
@@ -107,9 +107,9 @@ export class Herdr {
    * (keep it queued) otherwise. Known limit: a keystroke landing between that read and send-text still merges.
    * Once the text is in, a failed Enter counts as delivered: retrying would type it a second time.
    */
-  async typeLine(paneId: string, text: string, from: string): Promise<boolean> {
+  async typeLine(paneId: string, entries: readonly Typed[]): Promise<boolean> {
     if (!(await this.inputEmpty(paneId))) return false;
-    await this.call(["pane", "send-text", paneId, oneLine(`[from ${from}] ${text}`)]);
+    await this.call(["pane", "send-text", paneId, typedLine(entries)]);
     try {
       await this.call(["pane", "send-keys", paneId, "enter"]);
     } catch (e) {
@@ -130,12 +130,22 @@ export class Herdr {
       screen = await this.read(paneId, 40);
     } catch (e) {
       if (!(e instanceof HerdrError)) throw e;
-      process.stderr.write(`dori: could not read ${paneId} to check its input box (${e.message}); queued\n`);
+      this.noteOnce(paneId, `could not read ${paneId} to check its input box (${e.message}); queued`);
       return false;
     }
     const box = inputBox(screen);
-    if (box === "none") process.stderr.write(`dori: input box of ${paneId} not recognised; queued\n`);
+    this.noteOnce(paneId, box === "none" ? `input box of ${paneId} not recognised; queued` : undefined);
     return box === "empty";
+  }
+
+  private notes = new Map<string, string>();
+  /** Writes a note to stderr once per pane until it changes, so a duty loop does not repeat it every tick. */
+  private noteOnce(paneId: string, note: string | undefined): void {
+    if (note === undefined) this.notes.delete(paneId);
+    else if (this.notes.get(paneId) !== note) {
+      this.notes.set(paneId, note);
+      process.stderr.write(`dori: ${note}\n`);
+    }
   }
 
   /** Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it. */
@@ -184,11 +194,27 @@ export function inputBox(screen: string): "empty" | "draft" | "none" {
 
 /**
  * Flattens a message to one line so a typed Enter submits all of it at once.
- * Every other control character (\r, ESC, Ctrl-U, Ctrl-C, ...) becomes a space: typed into a PTY it would
- * act as a key, submitting early, interrupting the agent or erasing the `[from ...]` prefix.
+ * Every other control character, C0, DEL and C1 (\r, ESC, Ctrl-U, Ctrl-C, CSI, ...), becomes a space: typed into
+ * a PTY it would act as a key, submitting early, interrupting the agent or erasing the `[from ...]` prefix.
  * Known trade-off: code blocks, indentation and batch structure collapse into ` / `-joined text.
  */
 export const oneLine = (s: string): string =>
-  s.split(/\s*\n\s*/).filter(Boolean).join(" / ").replace(/[\x00-\x1f\x7f]/g, " ");
+  s.split(/\s*\n\s*/).filter(Boolean).join(" / ").replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+
+export type Typed = { readonly from: string; readonly text: string };
+
+/** Marks where each batched message starts; stripped from message text so a body cannot fake an entry. */
+const ENTRY = "␞";
+
+/**
+ * The one line typed for queued messages. Each starts `[from <sender>] `; a batch is headed `[from dori]` and
+ * every entry is opened with ␞, which no message text or sender can contain.
+ */
+export function typedLine(entries: readonly Typed[]): string {
+  const clean = (s: string) => oneLine(s).replaceAll(ENTRY, " ");
+  const one = (m: Typed) => `[from ${clean(m.from)}] ${clean(m.text)}`;
+  if (entries.length === 1) return one(entries[0]!);
+  return [`[from dori] ${entries.length} messages arrived while you were busy:`, ...entries.map((m, i) => `${ENTRY} (${i + 1}) ${one(m)}`)].join(" ");
+}
 
 export const shq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;

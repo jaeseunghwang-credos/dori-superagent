@@ -106,10 +106,9 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
       ? queued[0]!.text
       : `${queued.length} messages arrived while you were busy:\n\n` +
         queued.map((m, i) => `(${i + 1}) from ${m.from}:\n${m.text}`).join("\n\n");
-  const from = queued.length === 1 ? queued[0]!.from : "dori";
   const delivered = typeToLead
-    ? await d.herdr.typeLine(paneId, body, from)
-    : await d.herdr.deliver(paneId, body, status, from);
+    ? await d.herdr.typeLine(paneId, queued)
+    : await d.herdr.deliver(paneId, body, status, queued);
   if (!delivered) return false;
   d.store.clearInbox(paneId);
   return true;
