@@ -114,6 +114,10 @@ describe("pane messaging", () => {
       expect(inputBox(screen.replace("❯", "❯ half a thought"))).toBe("draft");
     }
     expect(inputBox("out\n❯\n~/workspace • status")).toBe("none");
+    // omo draws an ask_user_question selector in place of the input box: typing there could pick an option.
+    const dialog = readFileSync(join(import.meta.dir, "fixtures", "omo-input-question-dialog.txt"), "utf8");
+    expect(inputBox(dialog)).toBe("none");
+    expect(inputBox("earlier output\n" + dialog)).toBe("none");
     const rule = "─".repeat(40);
     expect(inputBox([rule, "❯ >", rule].join("\n"))).toBe("draft");
     expect(inputBox([rule, "│ a table cell │", rule].join("\n"))).toBe("none");

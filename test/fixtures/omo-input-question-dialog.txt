@@ -1,0 +1,14 @@
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Ask user · 30m
+ → Capture    Submit
+ dori-pr dialog capture test - please ignore
+ → 1. Alpha
+   2. Beta
+   Type your own answer...
+ Submit (0/1 answered) - Enter advances
+ ↑↓ move  1-9 select  space select  enter next  tab next question  c comment  esc cancel
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/private/tmp/dori-pr-dialog • CH45.0% • $0.131 • 44K/1M (4.4%) (auto)         (anthropic-subscription) claude-opus-5-5 • effort medium (shift+tab)
+(😺 OmO Native by Q Kim)
