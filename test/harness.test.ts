@@ -103,6 +103,18 @@ describe("pane messaging", () => {
       expect(inputBox(screen.replace("❯", "❯ half a thought"))).toBe("draft");
     }
     expect(inputBox("out\n❯\n~/workspace • status")).toBe("none");
+    const rule = "─".repeat(40);
+    expect(inputBox([rule, "❯ >", rule].join("\n"))).toBe("draft");
+    expect(inputBox([rule, "│ a table cell │", rule].join("\n"))).toBe("none");
+  });
+
+  test("control characters in the text or sender are never typed as keys", async () => {
+    const { d, lead } = setup();
+    lead.status = "working";
+    await send(d, "lead", "hi\r/quit", "x");
+    await send(d, "lead", "a\x1bb\x15c\x03d", "y\r!z");
+    expect(lead.received).toEqual(["[from x] hi /quit", "[from y !z] a b c d"]);
+    expect(lead.received.join("")).not.toMatch(/[\x00-\x1f\x7f]/);
   });
 
   test("a newline in the sender cannot split the typed line", async () => {

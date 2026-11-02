@@ -177,14 +177,18 @@ export function inputBox(screen: string): "empty" | "draft" | "none" {
   if (bottom < 1) return "none";
   const top = lines.slice(0, bottom).findLastIndex((l) => TOP_RULE.test(l));
   if (top < 0 || bottom - top < 2) return "none";
-  return lines.slice(top + 1, bottom).every((l) => /^[\s❯>│|]*$/.test(l)) ? "empty" : "draft";
+  const inside = lines.slice(top + 1, bottom);
+  if (!inside.some((l) => l.includes("❯"))) return "none";
+  return inside.every((l) => /^[\s❯]*$/.test(l)) ? "empty" : "draft";
 }
 
 /**
  * Flattens a message to one line so a typed Enter submits all of it at once.
+ * Every other control character (\r, ESC, Ctrl-U, Ctrl-C, ...) becomes a space: typed into a PTY it would
+ * act as a key, submitting early, interrupting the agent or erasing the `[from ...]` prefix.
  * Known trade-off: code blocks, indentation and batch structure collapse into ` / `-joined text.
  */
 export const oneLine = (s: string): string =>
-  s.split(/\s*\n\s*/).filter(Boolean).join(" / ");
+  s.split(/\s*\n\s*/).filter(Boolean).join(" / ").replace(/[\x00-\x1f\x7f]/g, " ");
 
 export const shq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
