@@ -10,5 +10,5 @@
  ↑↓ move  1-9 select  space select  enter next  tab next question  c comment  esc cancel
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-/private/tmp/dori-pr-dialog • CH45.0% • $0.131 • 44K/1M (4.4%) (auto)         (anthropic-subscription) claude-opus-5-5 • effort medium (shift+tab)
-(😺 OmO Native by Q Kim)
+~/project • Example task • CH99.0% • $0.000 • 10K/1M (1.0%) (auto)
+(OmO status line)

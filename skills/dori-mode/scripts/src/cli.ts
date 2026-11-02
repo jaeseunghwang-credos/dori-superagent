@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
+import { bootCheck, slackAuthCheck } from "./boot.ts";
 import { loadConfig } from "./config.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps, objectDone, watchTick } from "./done-flow.ts";
@@ -10,6 +12,7 @@ import { guardTick, sampleHost } from "./host-guard.ts";
 import { adoptLane, launchLane, LaunchError } from "./launch.ts";
 import { pauseLane, resumeLane } from "./pause.ts";
 import { Registry, statusOf } from "./registry.ts";
+import { isReportKind, reportLine, ReportError, Reports } from "./reports.ts";
 import { realClock, run } from "./run.ts";
 import { syncRegistry } from "./sync.ts";
 import { canLaunch } from "./routing.ts";
@@ -22,12 +25,18 @@ import { Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { realTimers } from "./messenger/typing.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
+import { formatVerifyPr, verifyPr } from "./verify-pr.ts";
 
 const USAGE = `dori <command> [options]
 
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
   sync   [--write]                     registry vs live panes; read-only unless --write
+  boot                                 read-only check after a restart: Slack auth, vanished panes, journals, stale watches
+  report <key> --kind milestone|blocker|question|halted|done --text TEXT
+                                       append a durable progress report and print its [REPORT] line
+  verify-pr <owner/repo> <num> [--loop N] [--cwd DIR]
+                                       check every commit's author/committer email and PR-level tests; print the UI test loop (not run)
   claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID
   object-done <key> --reason TEXT [--reason TEXT ...]
   close  <key> [--note TEXT]           close now (Done signals must read back live)
@@ -63,7 +72,7 @@ const flags = parseArgs({
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
     model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
-    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
+    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, kind: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -91,6 +100,14 @@ const every = async (minutes: number, tick: () => Promise<void>): Promise<void> 
 
 try {
   switch (command) {
+    case "report": {
+      const target = await lane(key ?? die("report needs a lane key"));
+      const kind = need("kind");
+      if (isReportKind(kind)) {
+        console.log(reportLine(new Reports(config.stateDir).report(target.key, kind, need("text"), realClock.now())));
+      } else die("--kind must be milestone, blocker, question, halted or done");
+      break;
+    }
     case "launch": {
       const r = await launchLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd") });
       console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}`);
@@ -109,6 +126,29 @@ try {
       console.log(r.drift.length ? `DRIFT (${r.drift.length}):\n${r.drift.map((d) => `- ${d}`).join("\n")}` : "DRIFT none");
       console.log(flags.values.write ? "WROTE session ids" : "READ_ONLY");
       break;
+    }
+    case "boot": {
+      const token = process.env.DORI_SLACK_TOKEN;
+      const slack = token ? new Slack(fetchHttp, realClock, { token, cookie: process.env.DORI_SLACK_COOKIE }) : null;
+      const sessionDirs = [process.env.PI_SESSION_DIR, process.env.PI_SESSION_FILE && dirname(process.env.PI_SESSION_FILE)];
+      const r = await bootCheck({
+        ...deps,
+        reports: new Reports(config.stateDir),
+        slack: slackAuthCheck(slack),
+        monitorDirs: sessionDirs.flatMap((dir) => (dir ? [join(dir, "extensions", "terminal")] : [])),
+      });
+      for (const line of r.lines) console.log(line);
+      process.exit(r.exitCode);
+    }
+    case "verify-pr": {
+      const repo = key ?? die("verify-pr needs owner/repo and a PR number");
+      const result = await verifyPr(repo, Number(flags.positionals[1]), run, {
+        expectedIdentity: config.repoIdentities[repo.toLowerCase()],
+        loopCount: Number(opt("loop") ?? 20),
+        cwd: opt("cwd"),
+      });
+      console.log(formatVerifyPr(result));
+      process.exit(result.ok ? 0 : 2);
     }
     case "claim-done":
       console.log(await claimDone(deps, await lane(key), need("evidence")));
@@ -244,6 +284,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
+  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof ReportError) die(e.message);
   throw e;
 }

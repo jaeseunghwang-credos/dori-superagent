@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
 import { join, resolve } from "node:path";
-import { Herdr, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
+import { Herdr, HerdrError, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
 import { KEY_RE, Store, type HostLoad, type Lane, type Role } from "./store.ts";
 import { Telemetry, type MergeOutcome, type Usage } from "./telemetry.ts";
 
@@ -209,7 +209,14 @@ export async function done(d: Deps, key: string): Promise<void> {
 
 // ---------- duty loop ----------
 
-export type DutyEvent = { lane?: string; pane?: string; action: string };
+export type DutyEvent = { lane?: string; pane?: string; action: string; detail?: string };
+
+/** A short one-line reason. A HerdrError message carries the whole argv (the queued text), so use herdr's own output. */
+function failureDetail(e: unknown): string {
+  const raw = e instanceof HerdrError ? e.result.stderr || e.result.stdout : e instanceof Error ? e.message : String(e);
+  const first = raw.trim().split("\n")[0] ?? "";
+  return first.length > 200 ? `${first.slice(0, 200)}...` : first;
+}
 
 /** One proactive pass: flush inboxes of panes that became idle, nudge silent lanes, escalate, detect lost panes. */
 export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
@@ -218,40 +225,46 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
     try {
       if (await flushInbox(d, paneId)) events.push({ pane: paneId, action: "flushed" });
     } catch (e) {
-      if (!(e instanceof Refusal)) throw e;
-      events.push({ pane: paneId, action: "inbox-target-gone" });
+      // One pane's failed delivery must never kill the loop for every other pane and lane.
+      if (e instanceof Refusal) events.push({ pane: paneId, action: "inbox-target-gone" });
+      else events.push({ pane: paneId, action: "flush-failed", detail: failureDetail(e) });
     }
   }
   for (const lane of d.store.lanes()) {
     if (lane.status !== "working" && lane.status !== "waiting") continue;
-    const st = await d.herdr.status(lane.paneId);
-    const now = d.now();
-    if (st === "gone") {
-      lane.status = "lost";
-      lane.log.push({ at: now, kind: "lost", text: "pane disappeared without READY" });
+    try {
+      const st = await d.herdr.status(lane.paneId);
+      const now = d.now();
+      if (st === "gone") {
+        lane.status = "lost";
+        lane.log.push({ at: now, kind: "lost", text: "pane disappeared without READY" });
+        d.store.saveLane(lane);
+        await tellLead(d, `[LOST ${lane.key}] pane ${lane.paneId} closed without a final answer`, "duty");
+        events.push({ lane: lane.key, action: "lost" });
+        continue;
+      }
+      if (st === "working") {
+        lane.lastActivityAt = now;
+        d.store.saveLane(lane);
+        continue;
+      }
+      if (lane.status === "waiting" || st === "blocked") continue;
+      const idleMin = (now - lane.lastActivityAt) / 60_000;
+      const due = NUDGE_MINUTES[lane.nudges];
+      if (due === undefined || idleMin < due) continue;
+      lane.nudges += 1;
+      lane.log.push({ at: now, kind: "nudge", text: `idle ${Math.floor(idleMin)} min` });
       d.store.saveLane(lane);
-      await tellLead(d, `[LOST ${lane.key}] pane ${lane.paneId} closed without a final answer`, "duty");
-      events.push({ lane: lane.key, action: "lost" });
-      continue;
-    }
-    if (st === "working") {
-      lane.lastActivityAt = now;
-      d.store.saveLane(lane);
-      continue;
-    }
-    if (lane.status === "waiting" || st === "blocked") continue;
-    const idleMin = (now - lane.lastActivityAt) / 60_000;
-    const due = NUDGE_MINUTES[lane.nudges];
-    if (due === undefined || idleMin < due) continue;
-    lane.nudges += 1;
-    lane.log.push({ at: now, kind: "nudge", text: `idle ${Math.floor(idleMin)} min` });
-    d.store.saveLane(lane);
-    if (lane.nudges < NUDGE_MINUTES.length) {
-      await send(d, lane.key, prompt("nudge.md", { key: lane.key, minutes: String(Math.floor(idleMin)), dori: d.doriCmd }), "duty");
-      events.push({ lane: lane.key, action: `nudge-${lane.nudges}` });
-    } else {
-      await tellLead(d, `[ESCALATE ${lane.key}] idle ${Math.floor(idleMin)} min with no READY after ${lane.nudges - 1} nudges`, "duty");
-      events.push({ lane: lane.key, action: "escalated" });
+      if (lane.nudges < NUDGE_MINUTES.length) {
+        await send(d, lane.key, prompt("nudge.md", { key: lane.key, minutes: String(Math.floor(idleMin)), dori: d.doriCmd }), "duty");
+        events.push({ lane: lane.key, action: `nudge-${lane.nudges}` });
+      } else {
+        await tellLead(d, `[ESCALATE ${lane.key}] idle ${Math.floor(idleMin)} min with no READY after ${lane.nudges - 1} nudges`, "duty");
+        events.push({ lane: lane.key, action: "escalated" });
+      }
+    } catch (e) {
+      // One lane's failed status read or delivery must not end the loop for the other lanes.
+      events.push({ lane: lane.key, action: "lane-failed", detail: failureDetail(e) });
     }
   }
   const count = (pred: (a: string) => boolean) => events.filter((e) => pred(e.action)).length;

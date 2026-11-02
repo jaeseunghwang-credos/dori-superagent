@@ -10,11 +10,12 @@ type Pane = {
   status: AgentStatus;
   received: string[];
   ran: string[];
-  notReady?: boolean;
-  /** Text in the pane's input box; `null` draws no box at all. */
+  /** Text in the pane's input box (typed text lands here until an Enter submits it); `null` draws no box at all. */
   draft?: string | null;
-  promptError?: string;
-  enterFails?: boolean;
+  /** `pane read` fails (exit 1) */
+  readFails?: boolean;
+  /** `pane send-text` fails (exit 1) */
+  sendTextFails?: boolean;
 };
 
 export class World {
@@ -23,6 +24,10 @@ export class World {
   clock = 1_000_000;
   host: HostLoad = { load1: 1, cores: 8, memFreePct: 50 };
   next = 1;
+  /** pane id -> herdr error text returned by `agent prompt` (exit 1) */
+  promptFails = new Map<string, string>();
+  /** number of upcoming `pane send-keys` calls that fail (exit 1) */
+  keyFails = 0;
   gh: (argv: readonly string[]) => { code: number; stdout: string } = () => ({ code: 1, stdout: "" });
   usage: TelemetryEvent[] = [];
   dutyCounts: DutyCounts[] = [];
@@ -63,17 +68,29 @@ export class World {
       return ok({ pane: { pane_id: id, agent: pane.status === "shell" ? null : "pi", agent_status: pane.status } });
     }
     if (group === "pane" && verb === "run") { pane.ran.push(String(argv[3])); return ok({}); }
-    if (group === "pane" && verb === "send-text") { pane.received.push(String(argv[3])); return ok({}); }
-    if (group === "pane" && verb === "send-keys" && pane.enterFails) return { code: 1, stdout: "", stderr: "key_failed" };
-    if (group === "pane" && verb === "send-keys") return ok({});
+    if (group === "pane" && verb === "send-text") {
+      if (pane.sendTextFails) return { code: 1, stdout: "", stderr: "send failed" };
+      pane.received.push(String(argv[3]));
+      if (pane.draft !== null) pane.draft = (pane.draft ?? "") + String(argv[3]);
+      return ok({});
+    }
+    if (group === "pane" && verb === "send-keys") {
+      if (this.keyFails > 0) { this.keyFails--; return { code: 1, stdout: "", stderr: "key press failed" }; }
+      if (pane.draft !== null) pane.draft = "";
+      return ok({});
+    }
     if (group === "pane" && verb === "read") {
+      if (pane.readFails) return { code: 1, stdout: "", stderr: "read failed" };
       const rule = "─".repeat(40);
       const box = pane.draft === null ? [] : [rule, `❯ ${pane.draft ?? ""}`, rule];
       return { code: 0, stdout: ["output", ...box, "~/workspace • status"].join("\n"), stderr: "" };
     }
-    if (group === "agent" && verb === "prompt" && pane.promptError) return { code: 1, stdout: "", stderr: pane.promptError };
-    if (group === "agent" && verb === "prompt" && pane.notReady) return { code: 1, stdout: "", stderr: "agent_not_ready" };
-    if (group === "agent" && verb === "prompt") { pane.received.push(String(argv[3])); return ok({}); }
+    if (group === "agent" && verb === "prompt") {
+      const fail = this.promptFails.get(id!);
+      if (fail) return { code: 1, stdout: "", stderr: fail };
+      pane.received.push(String(argv[3]));
+      return ok({});
+    }
     if (group === "pane" && verb === "close") { this.panes.delete(id!); return ok({}); }
     return { code: 1, stdout: "", stderr: `unhandled ${argv.join(" ")}` };
   };

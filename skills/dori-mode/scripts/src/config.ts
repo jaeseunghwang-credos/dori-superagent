@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { CommitIdentity } from "./verify-pr.ts";
+
 export type ArgvTemplate = readonly string[];
 
 export type Hooks = {
@@ -36,6 +38,8 @@ export type DoriConfig = {
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
   readonly hooks: Hooks;
+  /** Expected Git author and committer per lowercase `owner/repo`, for `verify-pr` and the lane footer. */
+  readonly repoIdentities: Readonly<Record<string, CommitIdentity>>;
 };
 
 export const defaultConfig = (home = homedir()): DoriConfig => ({
@@ -57,17 +61,28 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},
+  repoIdentities: {},
 });
 
 export const configPath = (): string => process.env.DORI_CONFIG ?? join(homedir(), ".dori", "config.json");
 
 export const expandHome = (path: string, home = homedir()): string => (path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
 
+const isIdentity = (value: unknown): value is CommitIdentity => {
+  const v = value as { name?: unknown; email?: unknown } | null;
+  return typeof v === "object" && v !== null && typeof v.name === "string" && !!v.name.trim() && typeof v.email === "string" && !!v.email.trim();
+};
+
+// The file is untrusted JSON: keep only well-formed identities, so a bad entry reads as an unconfigured repo.
+const repoIdentities = (value: unknown): Record<string, CommitIdentity> =>
+  typeof value !== "object" || value === null || Array.isArray(value) ? {}
+    : Object.fromEntries(Object.entries(value).flatMap(([repo, identity]) => (isIdentity(identity) ? [[repo.toLowerCase(), identity]] : [])));
+
 export const loadConfig = async (path = configPath(), home = homedir()): Promise<DoriConfig> => {
   const base = defaultConfig(home);
   const file = Bun.file(path);
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
-  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks } };
+  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, repoIdentities: repoIdentities(raw.repoIdentities) };
   return {
     ...merged,
     stateDir: expandHome(process.env.DORI_STATE_DIR ?? merged.stateDir, home),

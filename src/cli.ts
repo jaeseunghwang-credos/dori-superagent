@@ -135,7 +135,7 @@ export async function main(argv: readonly string[], d: Deps = defaultDeps()): Pr
     case "duty": {
       const interval = Number(one(a, "interval") ?? "60") * 1000;
       do {
-        for (const e of await dutyTick(d)) console.log(`DUTY ${e.lane ?? e.pane} ${e.action}`);
+        for (const e of await dutyTick(d)) console.log(`DUTY ${e.lane ?? e.pane} ${e.action}${e.detail ? `: ${e.detail}` : ""}`);
         if (one(a, "once")) break;
         await Bun.sleep(interval);
       } while (true);

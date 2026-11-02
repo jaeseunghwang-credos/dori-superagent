@@ -62,6 +62,56 @@ test("uncommitted tracked changes also block the close", async () => {
   expect(closedVia()).toHaveLength(0);
 });
 
+// A lane that never created a worktree works straight in its cwd. discoverWorktrees only returns
+// worktrees named after the lane key, so that lane used to be checked nowhere and closed on dirty work.
+test("a lane with no worktree of its own is still checked in its cwd", async () => {
+  world.worktreeList = "worktree /repo\nbranch refs/heads/main";
+  world.dirty = " M src/app.ts";
+  await claimDone(at(T0), lane, "merged acme/app#1");
+  await watchTick(at(T0 + 6 * MIN));
+  expect((await at(T0).registry.read("demo-lane"))?.objection?.reasons).toEqual(["unpushed work in /repo"]);
+  expect(closedVia()).toHaveLength(0);
+});
+
+test("a lane whose worktree is clean is not blocked by the human's checkout", async () => {
+  world.dirty = { [WT]: "", "/repo": " M notes/todo.md" };
+  await claimDone(at(T0), lane, "merged acme/app#1 abc123");
+  await watchTick(at(T0 + 4 * MIN));
+  const lines = await watchTick(at(T0 + 6 * MIN));
+  expect(lines[0]).toStartWith("LANE_CLOSED demo-lane");
+});
+
+test("a cwd that is not a git checkout raises no objection of its own", async () => {
+  world.worktreeList = "";
+  world.isGitRepo = "false";
+  world.dirty = "";
+  world.aheadCount = "0";
+  await claimDone(at(T0), lane, "merged acme/app#1 abc123");
+  await watchTick(at(T0 + 4 * MIN));
+  const lines = await watchTick(at(T0 + 6 * MIN));
+  expect(lines[0]).toStartWith("LANE_CLOSED demo-lane");
+});
+
+// The not-a-checkout skip is for the cwd fallback only: a worktree the lane owns whose git state cannot be read must
+// still block the close, as it did before #39 (#42).
+test("a lane-owned worktree whose git state is unreadable still blocks the close", async () => {
+  world.isGitRepo = "false";
+  await claimDone(at(T0), lane, "merged acme/app#1");
+  await watchTick(at(T0 + 6 * MIN));
+  expect((await at(T0).registry.read("demo-lane"))?.objection?.reasons).toEqual([`unpushed work in ${WT} (git state unreadable)`]);
+  expect(closedVia()).toHaveLength(0);
+});
+
+test("an unpushed commit in the cwd of a lane with no worktree blocks the close", async () => {
+  world.worktreeList = "worktree /repo\nbranch refs/heads/main";
+  world.dirty = "";
+  world.aheadCount = { "/repo": "2" };
+  await claimDone(at(T0), lane, "merged acme/app#1");
+  await watchTick(at(T0 + 6 * MIN));
+  expect((await at(T0).registry.read("demo-lane"))?.objection?.reasons).toEqual(["unpushed work in /repo"]);
+  expect(closedVia()).toHaveLength(0);
+});
+
 test("a Done signal that does not read back live becomes the objection", async () => {
   world.issueState = "OPEN";
   await claimDone(at(T0), lane, "merged acme/app#1");

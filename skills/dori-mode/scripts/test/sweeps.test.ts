@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 import { freshnessTick, lastReportLine } from "../src/freshness.ts";
 import { acquireSlot, releaseSlot } from "../src/heavy-slot.ts";
 import { guardTick } from "../src/host-guard.ts";
-import { adoptLane, launchLane, LaunchError } from "../src/launch.ts";
+import { adoptLane, cliCommand, footer, launchLane, LaunchError, shellQuote } from "../src/launch.ts";
 import type { Lane } from "../src/registry.ts";
 import { resolveSession } from "../src/session-id.ts";
 import { depsFor, fakeClock, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -142,6 +143,47 @@ test("launch reports STARTUP_OK only on a ready agent status; a blank pane is un
   expect(await run("done", "❯ ", "done-lane")).toStartWith("STARTUP_UNCONFIRMED done-lane w:p9");
 });
 
+test("launch registers the lane before it starts the agent, so the lane's first dori report is accepted", async () => {
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# brief\n");
+  const base = depsFor(world, fakeClock(T0), state.dir);
+  let atStart: Lane | null | undefined;
+  const deps = { ...base, run: async (argv: readonly string[]) => {
+    if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+    if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "run") atStart = await base.registry.read("fast-lane");
+    return base.run(argv);
+  } };
+  await launchLane(deps, { key: "fast-lane", title: "t", brief, done: "closed acme/app#3" });
+  expect(atStart?.pane).toBe("w:p9");
+});
+
+test("the harness launch record is not the lane's report: a silent launched lane is NO-REPORT, never posted", async () => {
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# brief\n");
+  world.screen = "Working (1m)\n❯ ";
+  const clock = fakeClock(T0);
+  const base = depsFor(world, clock, state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  const deps = { ...base, run: async (argv: readonly string[]) => {
+    if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+    return base.run(argv);
+  } };
+  await launchLane(deps, { key: "new-lane", title: "t", brief, done: "closed acme/app#3", thread: "chat:team/9" });
+  clock.at = T0 + 21 * MIN;
+  expect((await freshnessTick(deps, "/home/test")).map((a) => a.kind)).toEqual(["nudged", "no-report"]);
+  expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
+});
+
+test("the lane footer calls the skill CLI by its own path, never a bare dori that may be the root harness", async () => {
+  const text = footer({ ...working, key: "path-lane" }, "lead:p1");
+  const commands = [...text.matchAll(/bun (\S+) (report|claim-done) path-lane/g)];
+  expect(commands.map((m) => m[2])).toEqual(["report", "claim-done"]);
+  for (const [, cli] of commands) {
+    expect(cli).toEndWith("/skills/dori-mode/scripts/src/cli.ts");
+    expect(await Bun.file(cli ?? "").exists()).toBe(true);
+  }
+  expect(text).not.toMatch(/(^|\s)dori (report|claim-done)/);
+});
+
 test("the host guard alerts on low disk, clears when it recovers, and flips compute readiness on load", () => {
   const t = { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 };
   const st = { alerting: false } as { alerting: boolean; computeReady?: boolean };
@@ -213,4 +255,18 @@ test("a [REPORT] template with an unfilled placeholder is source, not a report: 
   expect(lastReportLine('echo "[REPORT] demo-lane | done | ${message}"', "demo-lane")).toBeNull();
   expect(lastReportLine("[REPORT] demo-lane | done | PR #12 merged", "demo-lane")).toBe("[REPORT] demo-lane | done | PR #12 merged");
   expect(lastReportLine("[REPORT] demo-lane | milestone | added getUser({id}) and ${HOME} docs", "demo-lane")).toBe("[REPORT] demo-lane | milestone | added getUser({id}) and ${HOME} docs");
+});
+
+test("the footer CLI command survives a skill path with a space or a quote", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dori skill's dir "));
+  try {
+    const cli = join(dir, "cli.ts");
+    writeFileSync(cli, 'console.log("CLI_OK " + process.argv.slice(2).join(" "));\n');
+    expect(shellQuote("/plain/path/cli.ts")).toBe("/plain/path/cli.ts");
+    const command = cliCommand(cli);
+    const proc = Bun.spawn(["bash", "-c", `${command} report path-lane --kind milestone`], { stdout: "pipe", stderr: "pipe" });
+    expect((await new Response(proc.stdout).text()).trim()).toBe("CLI_OK report path-lane --kind milestone");
+    expect(await proc.exited).toBe(0);
+    expect(footer({ ...working, key: "path-lane" }, "lead:p1")).toContain(cliCommand());
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

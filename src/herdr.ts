@@ -23,6 +23,12 @@ export class HerdrError extends Error {
 /** Agent lifecycle as herdr reports it. `shell` = no recognised agent in the pane. */
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown" | "shell" | "gone";
 
+/** The terminal needs a moment to finish a bracketed paste before an Enter is read as a submit. */
+const PASTE_SETTLE_MS = 400;
+
+/** How often the Enter that submits typed fallback text is tried before the delivery is reported as failed. */
+const ENTER_ATTEMPTS = 3;
+
 export type PaneRef = { readonly paneId: string; readonly tabId: string; readonly workspaceId: string };
 
 export class Herdr {
@@ -95,34 +101,44 @@ export class Herdr {
       await this.call(["agent", "prompt", paneId, text]);
       return true;
     } catch (e) {
-      if (!(e instanceof HerdrError && /agent_not_ready/.test(e.message))) throw e;
+      // herdr only accepts `agent prompt` for agents it started itself (`herdr agent start`); an omo launched
+      // with `pane run` is detected but refused. Fall back to typing the text and pressing Enter.
+      // Match herdr's own output, never e.message: that carries argv, which includes the delivered text.
+      if (!(e instanceof HerdrError) || !/agent_not_ready/.test(e.result.stderr || e.result.stdout)) throw e;
+      // agent_not_ready also covers an agent that exited and left a shell in front: typing would run the text there.
+      const st = await this.status(paneId);
+      if (st === "shell" || st === "gone") throw e;
       return this.typeLine(paneId, entries);
     }
   }
 
   /**
-   * Types a message into an agent's input box as one line, `[from <sender>] ` first so it can never start
-   * with a slash command or shell escape (the whole line, sender included, is flattened). Only an input box
-   * seen empty is typed into, so a human's half-written prompt is never merged and submitted; returns false
-   * (keep it queued) otherwise. Known limit: a keystroke landing between that read and send-text still merges.
-   * Once the text is in, a failed Enter counts as delivered: retrying would type it a second time.
+   * Types queued messages into an agent's input box as one line (see typedLine): `[from <sender>] ` first, control
+   * characters removed, so it can never start with a slash command or shell escape or act as a key. Only an input
+   * box seen empty is typed into, so a human's half-written prompt or an open dialog is never merged and submitted;
+   * returns false (keep it queued) otherwise. Known limit: a keystroke landing between that read and send-text
+   * still merges. Once the text is in, only the Enter is retried, so a flaky key press never re-types the message;
+   * after ENTER_ATTEMPTS it throws, the inbox is kept, and the next flush sees the text as a draft and waits.
    */
   async typeLine(paneId: string, entries: readonly Typed[]): Promise<boolean> {
     if (!(await this.inputEmpty(paneId))) return false;
     await this.call(["pane", "send-text", paneId, typedLine(entries)]);
-    try {
-      await this.call(["pane", "send-keys", paneId, "enter"]);
-    } catch (e) {
-      if (!(e instanceof HerdrError)) throw e;
-      process.stderr.write(`dori: text typed into ${paneId} but Enter failed (${e.message}); not retrying\n`);
+    // A paste needs a moment to settle before an Enter is read as a submit.
+    await Bun.sleep(PASTE_SETTLE_MS);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.call(["pane", "send-keys", paneId, "enter"]);
+        return true;
+      } catch (err) {
+        if (attempt >= ENTER_ATTEMPTS) throw err;
+      }
     }
-    return true;
   }
 
   /**
    * Best effort: true only when the bottom of the pane shows an input box holding nothing but its prompt
-   * glyph. A draft is false quietly; no recognisable box or a failed read is false with a stderr note,
-   * so a screen the parser does not know shows up instead of queueing in silence.
+   * glyph. Anything else is false with a stderr note (once per pane per state): a draft, no recognisable box,
+   * or a failed read, so a message that waits never waits in silence.
    */
   async inputEmpty(paneId: string): Promise<boolean> {
     let screen: string;
@@ -130,11 +146,18 @@ export class Herdr {
       screen = await this.read(paneId, 40);
     } catch (e) {
       if (!(e instanceof HerdrError)) throw e;
-      this.noteOnce(paneId, `could not read ${paneId} to check its input box (${e.message}); queued`);
+      this.noteOnce(paneId, `could not read ${paneId} to check its input box (${e.result.stderr.trim() || "no output"}); queued`);
       return false;
     }
     const box = inputBox(screen);
-    this.noteOnce(paneId, box === "none" ? `input box of ${paneId} not recognised; queued` : undefined);
+    this.noteOnce(
+      paneId,
+      box === "none"
+        ? `input box of ${paneId} not recognised; queued`
+        : box === "draft"
+          ? `input box of ${paneId} holds unsent text; queued until it is empty`
+          : undefined,
+    );
     return box === "empty";
   }
 
@@ -148,7 +171,7 @@ export class Herdr {
     }
   }
 
-  /** Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it. */
+  /** Types text + Enter into a plain shell pane. */
   async type(paneId: string, text: string): Promise<void> {
     await this.call(["pane", "send-text", paneId, text]);
     await this.call(["pane", "send-keys", paneId, "enter"]);
