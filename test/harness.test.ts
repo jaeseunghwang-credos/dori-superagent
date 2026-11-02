@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { done, dutyTick, mergeGate, ready, Refusal, report, review, send, startLane } from "../src/harness.ts";
+import { done, dutyTick, flushInbox, mergeGate, ready, Refusal, report, review, send, startLane } from "../src/harness.ts";
+import { inputBoxEmpty } from "../src/herdr.ts";
 import { World } from "./fake.ts";
 
 function setup() {
@@ -62,7 +63,7 @@ describe("pane messaging", () => {
     const { w, d, lead } = setup();
     lead.status = "working";
     expect(await send(d, "lead", "[READY x] done\nevidence: pr", "x")).toBe("DELIVERED");
-    expect(lead.received).toEqual(["[READY x] done / evidence: pr"]);
+    expect(lead.received).toEqual(["[from x] [READY x] done / evidence: pr"]);
     expect(w.calls.at(-1)!.argv).toEqual(["pane", "send-keys", "w1:p1", "enter"]);
     expect(d.store.queued("w1:p1")).toEqual([]);
   });
@@ -71,7 +72,69 @@ describe("pane messaging", () => {
     const { d, lead } = setup();
     lead.notReady = true;
     expect(await send(d, "lead", "a\n\nb", "x")).toBe("DELIVERED");
-    expect(lead.received).toEqual(["a / b"]);
+    expect(lead.received).toEqual(["[from x] a / b"]);
+  });
+
+  test("typed text always starts with the sender, so a leading / or ! is never a command", async () => {
+    const { d, lead } = setup();
+    lead.status = "working";
+    await send(d, "lead", "/quit", "telegram");
+    await send(d, "lead", "!rm -rf ~", "a-lane");
+    expect(lead.received).toEqual(["[from telegram] /quit", "[from a-lane] !rm -rf ~"]);
+  });
+
+  test("a half-written draft, or a screen with no input box, is never typed into: it queues", async () => {
+    const { d, lead } = setup();
+    lead.status = "working";
+    lead.draft = "half a thou";
+    expect(await send(d, "lead", "note", "x")).toBe("QUEUED");
+    lead.draft = null;
+    expect(await send(d, "lead", "note 2", "x")).toBe("QUEUED");
+    expect(lead.received).toEqual([]);
+    lead.draft = "";
+    expect(await flushInbox(d, "w1:p1")).toBe(true);
+    expect(lead.received).toEqual(["[from dori] 2 messages arrived while you were busy: / (1) from x: / note / (2) from x: / note 2"]);
+  });
+
+  test("the input box is read from omo's real screen, including the Working label on its top rule", () => {
+    const rule = "─".repeat(60);
+    const working = `── • Working (4s • esc to interrupt) ${"─".repeat(30)}`;
+    const status = "~/workspace • CH99.5%";
+    expect(inputBoxEmpty(["out", rule, "❯", rule, status].join("\n"))).toBe(true);
+    expect(inputBoxEmpty(["out", working, "❯", rule, status].join("\n"))).toBe(true);
+    expect(inputBoxEmpty(["out", working, "❯ half a", "  thought", rule, status].join("\n"))).toBe(false);
+    expect(inputBoxEmpty(["out", "❯", status].join("\n"))).toBe(false);
+  });
+
+  test("a lead whose state herdr cannot classify is not typed into", async () => {
+    const { d, lead } = setup();
+    lead.status = "unknown";
+    expect(await send(d, "lead", "hi", "x")).toBe("QUEUED");
+    expect(lead.received).toEqual([]);
+  });
+
+  test("a failed Enter after the text went in counts as delivered, so a retry never types it twice", async () => {
+    const { d, lead } = setup();
+    lead.status = "working";
+    lead.enterFails = true;
+    expect(await send(d, "lead", "once", "x")).toBe("DELIVERED");
+    expect(await flushInbox(d, "w1:p1")).toBe(true);
+    expect(lead.received).toEqual(["[from x] once"]);
+  });
+
+  test("an agent prompt error other than agent_not_ready is raised, not typed", async () => {
+    const { d, lead } = setup();
+    lead.promptError = "boom";
+    await expect(send(d, "lead", "hi", "x")).rejects.toThrow("boom");
+    expect(lead.received).toEqual([]);
+  });
+
+  test("an idle lane herdr cannot prompt gets the typed fallback too", async () => {
+    const { w, d } = setup();
+    const lane = w.addPane("w1:p9", "idle");
+    lane.notReady = true;
+    expect(await send(d, "w1:p9", "go", "lead")).toBe("DELIVERED");
+    expect(lane.received).toEqual(["[from lead] go"]);
   });
 
   test("a busy lane is not typed into; it still queues", async () => {

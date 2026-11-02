@@ -83,22 +83,61 @@ export class Herdr {
    * Delivers one message into a pane as a single argv element: nothing in it is ever
    * expanded by a shell. Agents get `agent prompt`; a plain shell pane gets text + Enter.
    * An agent herdr will not prompt (agent_not_ready, e.g. omo with a foreground SDK child)
-   * gets the message typed as one line instead.
+   * gets the message typed as one line instead (see typeLine). Returns false when nothing was
+   * delivered and the message must stay queued.
    */
-  async deliver(paneId: string, text: string, kind: AgentStatus): Promise<void> {
-    if (kind === "shell") return this.type(paneId, text);
+  async deliver(paneId: string, text: string, kind: AgentStatus, from: string): Promise<boolean> {
+    if (kind === "shell") {
+      await this.type(paneId, text);
+      return true;
+    }
     try {
       await this.call(["agent", "prompt", paneId, text]);
+      return true;
     } catch (e) {
       if (!(e instanceof HerdrError && /agent_not_ready/.test(e.message))) throw e;
-      await this.type(paneId, oneLine(text));
+      return this.typeLine(paneId, text, from);
     }
   }
 
-  /** Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it. */
+  /**
+   * Types a message into an agent's input box as one line, `[from <sender>] ` first so it can never start
+   * with a slash command or shell escape. Only an input box seen empty is typed into, so a human's
+   * half-written prompt is never merged and submitted; returns false (keep it queued) otherwise.
+   */
+  async typeLine(paneId: string, text: string, from: string): Promise<boolean> {
+    if (!(await this.inputEmpty(paneId))) return false;
+    await this.type(paneId, `[from ${from}] ${oneLine(text)}`);
+    return true;
+  }
+
+  /**
+   * Best effort: true only when the bottom of the pane shows an input box (a line between two
+   * horizontal rules) holding nothing but its prompt glyph. Any other screen, or a failed read, is false.
+   */
+  async inputEmpty(paneId: string): Promise<boolean> {
+    let screen: string;
+    try {
+      screen = await this.read(paneId, 40);
+    } catch (e) {
+      if (e instanceof HerdrError) return false;
+      throw e;
+    }
+    return inputBoxEmpty(screen);
+  }
+
+  /**
+   * Types text + Enter. omo takes typed input mid-turn as a follow-up, so this does not interrupt it.
+   * Once the text is in, a failed Enter still counts as delivered: retrying would type it a second time.
+   */
   async type(paneId: string, text: string): Promise<void> {
     await this.call(["pane", "send-text", paneId, text]);
-    await this.call(["pane", "send-keys", paneId, "enter"]);
+    try {
+      await this.call(["pane", "send-keys", paneId, "enter"]);
+    } catch (e) {
+      if (!(e instanceof HerdrError)) throw e;
+      process.stderr.write(`dori: text typed into ${paneId} but Enter failed (${e.message}); not retrying\n`);
+    }
   }
 
   async read(paneId: string, lines = 80): Promise<string> {
@@ -120,7 +159,27 @@ function toPaneRef(v: unknown): PaneRef {
   return { paneId, tabId: String(o["tab_id"] ?? ""), workspaceId: String(o["workspace_id"] ?? "") };
 }
 
-/** Flattens a message to one line so a typed Enter submits all of it at once. */
+const BOTTOM_RULE = /^\s*─{10,}\s*$/;
+/** omo labels the top rule while it works: `── • Working (4s • esc to interrupt) ────`. */
+const TOP_RULE = /^\s*─{2,}.*─{3,}\s*$/;
+
+/**
+ * True when the input box (the last pure horizontal rule and the rule above it) holds only prompt
+ * glyphs and spaces. No box, or anything typed in it, is false.
+ */
+export function inputBoxEmpty(screen: string): boolean {
+  const lines = screen.split("\n");
+  const bottom = lines.findLastIndex((l) => BOTTOM_RULE.test(l));
+  if (bottom < 1) return false;
+  const top = lines.slice(0, bottom).findLastIndex((l) => TOP_RULE.test(l));
+  if (top < 0 || bottom - top < 2) return false;
+  return lines.slice(top + 1, bottom).every((l) => /^[\s❯>│|]*$/.test(l));
+}
+
+/**
+ * Flattens a message to one line so a typed Enter submits all of it at once.
+ * Known trade-off: code blocks, indentation and batch structure collapse into ` / `-joined text.
+ */
 export const oneLine = (s: string): string =>
   s.split(/\s*\n\s*/).filter(Boolean).join(" / ");
 

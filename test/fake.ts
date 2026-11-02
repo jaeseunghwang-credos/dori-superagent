@@ -6,7 +6,16 @@ import { Herdr, type AgentStatus, type Exec } from "../src/herdr.ts";
 import { Store, type HostLoad } from "../src/store.ts";
 import type { DutyCounts, TelemetryEvent, Usage } from "../src/telemetry.ts";
 
-type Pane = { status: AgentStatus; received: string[]; ran: string[]; notReady?: boolean };
+type Pane = {
+  status: AgentStatus;
+  received: string[];
+  ran: string[];
+  notReady?: boolean;
+  /** Text in the pane's input box; `null` draws no box at all. */
+  draft?: string | null;
+  promptError?: string;
+  enterFails?: boolean;
+};
 
 export class World {
   panes = new Map<string, Pane>();
@@ -55,7 +64,14 @@ export class World {
     }
     if (group === "pane" && verb === "run") { pane.ran.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "send-text") { pane.received.push(String(argv[3])); return ok({}); }
+    if (group === "pane" && verb === "send-keys" && pane.enterFails) return { code: 1, stdout: "", stderr: "key_failed" };
     if (group === "pane" && verb === "send-keys") return ok({});
+    if (group === "pane" && verb === "read") {
+      const rule = "─".repeat(40);
+      const box = pane.draft === null ? [] : [rule, `❯ ${pane.draft ?? ""}`, rule];
+      return { code: 0, stdout: ["output", ...box, "~/workspace • status"].join("\n"), stderr: "" };
+    }
+    if (group === "agent" && verb === "prompt" && pane.promptError) return { code: 1, stdout: "", stderr: pane.promptError };
     if (group === "agent" && verb === "prompt" && pane.notReady) return { code: 1, stdout: "", stderr: "agent_not_ready" };
     if (group === "agent" && verb === "prompt") { pane.received.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "close") { this.panes.delete(id!); return ok({}); }
