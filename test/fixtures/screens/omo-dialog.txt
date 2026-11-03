@@ -1,0 +1,12 @@
+    claude-opus-5 [anthropic-subscription]
+    claude-sonnet-5-5 [anthropic-subscription]
+    gpt-5.5 [chatgpt-subscription]
+  … 213 more below
+
+  Model Name: Claude Opus 5.5
+
+  Model catalogs refreshed.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work/project • 0/1M (0.0%) (auto)                            (anthropic-subscription) claude-opus-5-5 • effort medium (shift+tab)
+(😺 OmO Native by Q Kim)

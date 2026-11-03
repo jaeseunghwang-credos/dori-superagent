@@ -6,7 +6,8 @@ import { Herdr, type AgentStatus, type Exec } from "../src/herdr.ts";
 import { Store, type HostLoad } from "../src/store.ts";
 import type { DutyCounts, TelemetryEvent, Usage } from "../src/telemetry.ts";
 
-type Pane = { status: AgentStatus; received: string[]; ran: string[] };
+/** `screen` is what `pane read` returns; undefined makes the read fail. */
+type Pane = { status: AgentStatus; received: string[]; ran: string[]; screen?: string | undefined };
 
 export class World {
   panes = new Map<string, Pane>();
@@ -56,6 +57,9 @@ export class World {
     if (!pane) return { code: 1, stdout: "", stderr: `pane_not_found ${id}` };
     if (group === "pane" && verb === "get") {
       return ok({ pane: { pane_id: id, agent: pane.status === "shell" ? null : "pi", agent_status: pane.status } });
+    }
+    if (group === "pane" && verb === "read") {
+      return pane.screen === undefined ? { code: 1, stdout: "", stderr: "read failed" } : { code: 0, stdout: pane.screen, stderr: "" };
     }
     if (group === "pane" && verb === "run") { pane.ran.push(String(argv[3])); return ok({}); }
     if (group === "pane" && verb === "send-text") { pane.received.push(String(argv[3])); return ok({}); }

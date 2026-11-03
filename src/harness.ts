@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
 import { join, resolve } from "node:path";
-import { Herdr, HerdrError, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
+import { Herdr, HerdrError, omoScreenIdle, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
 import { KEY_RE, Store, type HostLoad, type Lane, type Role } from "./store.ts";
 import { Telemetry, type MergeOutcome, type Usage } from "./telemetry.ts";
 
@@ -92,8 +92,9 @@ export async function send(d: Deps, target: string, text: string, from: string):
 export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   const queued = d.store.queued(paneId);
   if (queued.length === 0) return true;
-  const status = await d.herdr.status(paneId);
+  let status = await d.herdr.status(paneId);
   if (status === "gone") throw new Refusal(`pane ${paneId} is gone; ${queued.length} message(s) kept in its inbox`);
+  if (status === "working" && (await screenShowsIdle(d, paneId))) status = "idle";
   if (!READY_TO_READ.includes(status)) return false;
   const body =
     queued.length === 1
@@ -103,6 +104,18 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   await d.herdr.deliver(paneId, body, status);
   d.store.clearInbox(paneId);
   return true;
+}
+
+/**
+ * herdr reports an omo with live monitors as `working` between turns (#62). Believe the screen only when it
+ * positively shows the idle input; a failed read is doubt, so the message stays queued for the next duty pass.
+ */
+async function screenShowsIdle(d: Deps, paneId: string): Promise<boolean> {
+  try {
+    return omoScreenIdle(await d.herdr.read(paneId, 30));
+  } catch {
+    return false;
+  }
 }
 
 export async function tellLead(d: Deps, text: string, from: string): Promise<void> {
